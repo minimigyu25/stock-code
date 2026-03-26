@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PyCharting</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.24/dist/uPlot.min.css">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html, body {
+            height: 100%;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f3ef;
+            color: #111111;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 10px 20px;
+            border-bottom: 1px solid #222;
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            padding: 8px 12px 12px;
+            overflow: hidden;
+        }
+        
+        #chartContainer {
+            width: 100%;
+            position: relative;
+            min-height: 200px;
+        }
+        
+        .chart-tools {
+            position: absolute;
+            left: 10px;
+            bottom: 10px;
+            z-index: 1000;  /* Higher z-index to be above chart */
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .tool-btn {
+            width: 40px;
+            height: 40px;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            transition: all 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            pointer-events: auto;  /* Ensure button is clickable */
+        }
+        
+        .tool-btn:hover {
+            background: #2196F3;
+            color: white;
+            border-color: #2196F3;
+        }
+        
+        .tool-btn.active {
+            background: #2196F3;
+            color: white;
+            border-color: #1976D2;
+        }
+
+        .resize-handle {
+            width: 100%;
+            height: 3px;
+            background: transparent;
+            cursor: ns-resize;
+            position: relative;
+            margin: 0;
+            transition: background 0.2s;
+        }
+
+        .resize-handle:hover {
+            background: #bbb;
+        }
+
+        .resize-handle:active {
+            background: #888;
+        }
+        
+        .resize-handle::before {
+            content: '';
+            position: absolute;
+            width: 40px;
+            height: 1px;
+            background: #ddd;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        #subplotsContainer {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .subplot-wrapper {
+            width: 100%;
+            position: relative;
+            min-height: 80px;
+        }
+
+        /* keep required DOM nodes for JS, but hide them */
+        #uiHidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <header>PyCharting</header>
+    <main id="mainContainer">
+        <div id="chartContainer">
+            <div class="chart-tools">
+                <button id="measureBtn" class="tool-btn" title="Measurement Tool (Right Click)">📏</button>
+            </div>
+        </div>
+        <div id="mainResizeHandle" class="resize-handle" style="display: none;"></div>
+        <div id="subplotsContainer"></div>
+
+        <!-- hidden UI elements kept for JS compatibility -->
+        <div id="uiHidden">
+            <div id="loadingIndicator"></div>
+            <span id="loadingStatus"></span>
+            <span id="totalPoints"></span>
+            <span id="cachedRange"></span>
+            <span id="visibleRange"></span>
+        </div>
+    </main>
+    
+    <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.24/dist/uPlot.iife.min.js"></script>
+    <script src="/static/js/chart.js"></script>
+    <script src="/static/js/viewport.js"></script>
+    <script>
+        let chart = null;
+        let viewportManager = null;
+        // Name -> uPlot instance for indicator-style subplots
+        let subplotCharts = {};
+        
+        function getSessionId() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('session') || null;
+        }
+        
+        // Initialize chart
+        function setupChart() {
+            const container = document.getElementById('chartContainer');
+            const height = container.offsetHeight || 500;
+            chart = new PyChart(container, {
+                title: '',
+                height: height
+            });
+            
+            // Setup measurement tool button (only once)
+            setupMeasurementButton();
+        }
+        
+        // Setup measurement tool button
+        function setupMeasurementButton() {
+            const measureBtn = document.getElementById('measureBtn');
+            if (!measureBtn) {
+                console.error('Measurement button not found');
+                return;
+            }
+            
+            // Remove existing listeners (if any)
+            const newBtn = measureBtn.cloneNode(true);
+            measureBtn.parentNode.replaceChild(newBtn, measureBtn);
+            
+            chart.registerMeasurementButton(newBtn);
+            
+            // Add click handler
+            newBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                console.log('Measurement button clicked');
+                
+                if (!chart) {
+                    console.error('Chart not initialized');
+                    return;
+                }
+                
+                if (chart.measurementEnabled) {
+                    console.log('Disabling measurement tool');
+                    chart.disableMeasurementTool();
+                } else {
+                    console.log('Enabling measurement tool');
+                    chart.enableMeasurementTool();
+                }
+            });
+            
+            console.log('Measurement button initialized');
+        }
+        
+        // Initialize viewport manager and load data
+        async function initializeData() {
+            if (!chart) {
+                setupChart();
+            }
+            
+            const sessionId = getSessionId() || 'viewport-demo';
+            
+            // Create viewport manager with loading callbacks
+            viewportManager = new ViewportManager(chart, {
+                sessionId: sessionId,
+                bufferMargin: 0.5,
+                debounceDelay: 300,
+                onLoading: [updateLoadingState],
+                onSubplotsUpdate: [updateSubplots]
+            });
+            
+            try {
+                if (sessionId === 'viewport-demo') {
+                    // Standalone demo: create a demo session on the backend
+                    const result = await viewportManager.initializeSession();
+                    document.getElementById('totalPoints').textContent = 
+                        result.data_points.toLocaleString();
+                } else {
+                    // Python API path: session already exists with real user data
+                    await viewportManager.loadInitialData();
+                    const info = viewportManager.getCacheInfo();
+                    if (info.totalLength) {
+                        document.getElementById('totalPoints').textContent = 
+                            info.totalLength.toLocaleString();
+                    }
+                }
+                
+                updateCacheInfo();
+                
+                // Setup viewport tracking
+                setupViewportTracking();
+                
+                // Ensure measurement button is ready
+                setupMeasurementButton();
+                
+            } catch (error) {
+                alert('Failed to initialize session: ' + error.message);
+            }
+        }
+        
+        // Update loading state
+        function updateLoadingState(isLoading) {
+            const indicator = document.getElementById('loadingIndicator');
+            const status = document.getElementById('loadingStatus');
+            
+            if (isLoading) {
+                indicator.classList.add('active');
+                status.textContent = 'Loading...';
+                status.style.color = '#ff9800';
+            } else {
+                indicator.classList.remove('active');
+                status.textContent = 'Ready';
+                status.style.color = '#4caf50';
+            }
+        }
+        
+        // Setup viewport tracking
+        function setupViewportTracking() {
+            if (!chart.chart) return;
+            
+            // Track viewport changes
+            setInterval(() => {
+                if (chart.chart && chart.chart.scales && chart.chart.scales.x) {
+                    const scale = chart.chart.scales.x;
+                    if (scale.min != null && scale.max != null) {
+                        document.getElementById('visibleRange').textContent = 
+                            `${Math.floor(scale.min)} - ${Math.floor(scale.max)}`;
+                    }
+                }
+            }, 1000);
+        }
+
+        function barPlugin(seriesIndices) {
+            return {
+                hooks: {
+                    draw: [
+                        (u) => {
+                            const ctx = u.ctx;
+                            const xData = u.data[0];
+                            if (!xData) return;
+
+                            for (const si of seriesIndices) {
+                                const yData = u.data[si.idx];
+                                if (!yData) continue;
+
+                                const ref = u.series[si.idx];
+                                const idxs = ref && ref.idxs;
+                                const iMin = idxs ? idxs[0] : 0;
+                                const iMax = idxs ? idxs[1] : xData.length - 1;
+
+                                const xPos = (i) => Math.round(u.valToPos(xData[i], 'x', true));
+                                const yPos = (val) => Math.round(u.valToPos(val, 'y', true));
+                                const y0 = yPos(0);
+
+                                const numBars = Math.max(1, iMax - iMin);
+                                const barWidth = Math.max(1, Math.floor((u.bbox.width / numBars) * 0.65));
+
+                                for (let i = iMin; i <= iMax; i++) {
+                                    const val = yData[i];
+                                    if (val == null) continue;
+                                    const x = xPos(i);
+                                    const y = yPos(val);
+                                    const h = Math.abs(y - y0);
+                                    ctx.fillStyle = si.color
+                                        ? (val >= 0 ? si.color : si.colorNeg || si.color)
+                                        : (val >= 0 ? '#26a69a' : '#ef5350');
+                                    ctx.fillRect(x - barWidth / 2, Math.min(y, y0), barWidth, h || 1);
+                                }
+                            }
+                        }
+                    ]
+                }
+            };
+        }
+
+        function scatterPlugin(seriesIndices) {
+            return {
+                hooks: {
+                    draw: [
+                        (u) => {
+                            const ctx = u.ctx;
+                            const xData = u.data[0];
+                            if (!xData) return;
+
+                            for (const si of seriesIndices) {
+                                const yData = u.data[si.idx];
+                                if (!yData) continue;
+
+                                const ref = u.series[si.idx];
+                                const idxs = ref && ref.idxs;
+                                const iMin = idxs ? idxs[0] : 0;
+                                const iMax = idxs ? idxs[1] : xData.length - 1;
+
+                                const radius = si.size || 3;
+
+                                for (let i = iMin; i <= iMax; i++) {
+                                    const val = yData[i];
+                                    if (val == null) continue;
+                                    const x = Math.round(u.valToPos(xData[i], 'x', true));
+                                    const y = Math.round(u.valToPos(val, 'y', true));
+                                    ctx.beginPath();
+                                    ctx.arc(x, y, radius, 0, Math.PI * 2);
+                                    ctx.fillStyle = si.color || '#9C27B0';
+                                    ctx.fill();
+                                }
+                            }
+                        }
+                    ]
+                }
+            };
+        }
+
+        function formatSubplotTick(v, rangeMs) {
+            if (typeof v === 'number' && v > 315360000000) {
+                const d = new Date(v);
+                const HOUR = 3600000, DAY = 86400000;
+                if (rangeMs != null) {
+                    if (rangeMs < 2 * HOUR) return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+                    if (rangeMs < 3 * DAY) return d.toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    if (rangeMs < 180 * DAY) return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
+                }
+                return d.toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            }
+            return typeof v === 'number' ? Math.round(v).toString() : String(v);
+        }
+
+        function updateSubplots(data) {
+            if (!data || !data.subplots || !data.index) return;
+
+            const container = document.getElementById('subplotsContainer');
+            const xValues = data.index;
+            const meta = data.subplot_meta || {};
+            const panelNames = Object.keys(meta);
+
+            if (panelNames.length === 0) return;
+
+            window.viewportSubplotCharts = subplotCharts;
+
+            const defaultColors = ['#FF9800', '#2196F3', '#9C27B0', '#4CAF50', '#f44336', '#00BCD4', '#795548'];
+
+            const xAxisConfig = {
+                show: true,
+                size: 40,
+                gap: 8,
+                splits: (u, axisIdx, scaleMin, scaleMax) => {
+                    if (!(typeof scaleMin === 'number' && scaleMin > 315360000000))
+                        return uPlot.paths.linear;
+                    const range = scaleMax - scaleMin;
+                    const maxTicks = Math.max(2, Math.floor(u.bbox.width / 120));
+                    const intervals = [
+                        60000,120000,300000,600000,900000,1800000,3600000,
+                        7200000,14400000,28800000,43200000,86400000,
+                        172800000,604800000,2592000000,7776000000,31536000000
+                    ];
+                    let step = intervals[intervals.length - 1];
+                    for (const iv of intervals) { if (range / iv <= maxTicks) { step = iv; break; } }
+                    const first = Math.ceil(scaleMin / step) * step;
+                    const splits = [];
+                    for (let v = first; v <= scaleMax; v += step) splits.push(v);
+                    return splits;
+                },
+                values: (u, vals) => {
+                    const s = u.scales.x;
+                    const rangeMs = (s && s.max != null && s.min != null) ? s.max - s.min : null;
+                    return vals.map(v => formatSubplotTick(v, rangeMs));
+                },
+            };
+
+            panelNames.forEach((panelName) => {
+                const seriesMeta = meta[panelName];
+                if (!Array.isArray(seriesMeta) || seriesMeta.length === 0) return;
+
+                const dataArrays = [xValues];
+                const uplotSeries = [{
+                    value: (u, v) => {
+                        const s = u.scales.x;
+                        const r = (s && s.max != null && s.min != null) ? s.max - s.min : null;
+                        return formatSubplotTick(v, r);
+                    },
+                }];
+
+                const barSeriesIndices = [];
+                const scatterSeriesIndices = [];
+
+                seriesMeta.forEach((sm, idx) => {
+                    const arr = data.subplots[sm.key];
+                    if (!Array.isArray(arr)) return;
+                    dataArrays.push(arr);
+                    const sIdx = idx + 1;
+                    const color = sm.color || defaultColors[idx % defaultColors.length];
+
+                    if (sm.type === 'bar') {
+                        uplotSeries.push({
+                            label: sm.label || sm.key,
+                            stroke: 'transparent',
+                            paths: () => null,
+                            points: { show: false },
+                        });
+                        barSeriesIndices.push({ idx: sIdx, color: null });
+                    } else if (sm.type === 'scatter') {
+                        uplotSeries.push({
+                            label: sm.label || sm.key,
+                            stroke: 'transparent',
+                            paths: () => null,
+                            points: { show: false },
+                        });
+                        scatterSeriesIndices.push({ idx: sIdx, color: color, size: 3 });
+                    } else {
+                        uplotSeries.push({
+                            label: sm.label || sm.key,
+                            stroke: color,
+                            width: 2,
+                        });
+                    }
+                });
+
+                if (dataArrays.length < 2) return;
+
+                if (!subplotCharts[panelName]) {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'subplot-wrapper';
+                    wrapper.dataset.name = panelName;
+                    wrapper.style.height = '150px';
+
+                    const title = document.createElement('div');
+                    title.textContent = panelName;
+                    title.style.fontSize = '12px';
+                    title.style.fontWeight = '600';
+                    title.style.marginBottom = '4px';
+                    title.style.color = '#555';
+
+                    const div = document.createElement('div');
+                    div.style.height = '130px';
+                    div.dataset.chartDiv = panelName;
+
+                    wrapper.appendChild(title);
+                    wrapper.appendChild(div);
+                    container.appendChild(wrapper);
+
+                    const resizeHandle = document.createElement('div');
+                    resizeHandle.className = 'resize-handle';
+                    resizeHandle.dataset.target = panelName;
+                    container.appendChild(resizeHandle);
+                    setupResizeHandle(resizeHandle, wrapper, div);
+
+                    const plugins = [];
+                    if (barSeriesIndices.length > 0) plugins.push(barPlugin(barSeriesIndices));
+                    if (scatterSeriesIndices.length > 0) plugins.push(scatterPlugin(scatterSeriesIndices));
+
+                    const chart = new uPlot({
+                        width: container.clientWidth || 800,
+                        height: 130,
+                        series: uplotSeries,
+                        scales: { x: { time: false }, y: { auto: true } },
+                        axes: [xAxisConfig, { label: panelName, labelSize: 18 }],
+                        cursor: { drag: { x: false, y: false }, sync: { key: 'pycharting' } },
+                        plugins: plugins,
+                    }, dataArrays, div);
+
+                    subplotCharts[panelName] = chart;
+                } else {
+                    subplotCharts[panelName].setData(dataArrays);
+                }
+            });
+        }
+        
+        // Show cache information (no visible UI on minimal page, kept for compatibility)
+        function showCacheInfo() {
+            if (!viewportManager) {
+                return;
+            }
+            const info = viewportManager.getCacheInfo();
+            console.log('Cache info', info);
+            updateCacheInfo();
+        }
+
+        // Update cache info display
+        function updateCacheInfo() {
+            if (!viewportManager) return;
+            
+            const info = viewportManager.getCacheInfo();
+            if (info.cached) {
+                document.getElementById('cachedRange').textContent = 
+                    `${info.startIndex} - ${info.endIndex}`;
+            } else {
+                document.getElementById('cachedRange').textContent = 'No cache';
+            }
+        }
+        
+        // Clear cache (no alerts on minimal page)
+        function clearCache() {
+            if (!viewportManager) {
+                return;
+            }
+
+            viewportManager.clearCache();
+            const el = document.getElementById('cachedRange');
+            if (el) {
+                el.textContent = 'Cache cleared';
+            }
+        }
+        
+        // Setup resize handler for a subplot
+        function setupResizeHandle(handle, wrapper, chartDiv) {
+            let isResizing = false;
+            let startY = 0;
+            let startHeight = 0;
+            
+            handle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                startY = e.clientY;
+                startHeight = wrapper.offsetHeight;
+                e.preventDefault();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+                
+                const deltaY = e.clientY - startY;
+                const newHeight = Math.max(80, startHeight + deltaY);
+                const newChartHeight = newHeight - 20; // Account for title
+                
+                wrapper.style.height = newHeight + 'px';
+                chartDiv.style.height = newChartHeight + 'px';
+                
+                // Resize the uPlot chart
+                const chartName = wrapper.dataset.name;
+                if (subplotCharts[chartName]) {
+                    subplotCharts[chartName].setSize({
+                        width: chartDiv.offsetWidth,
+                        height: newChartHeight
+                    });
+                }
+            });
+            
+            document.addEventListener('mouseup', () => {
+                isResizing = false;
+            });
+        }
+        
+        // Setup main chart resize handle
+        function setupMainResize() {
+            const handle = document.getElementById('mainResizeHandle');
+            const chartContainer = document.getElementById('chartContainer');
+            const mainContainer = document.getElementById('mainContainer');
+            
+            let isResizing = false;
+            let startY = 0;
+            let startHeight = 0;
+            
+            handle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                startY = e.clientY;
+                startHeight = chartContainer.offsetHeight;
+                e.preventDefault();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+                
+                const deltaY = e.clientY - startY;
+                const newHeight = Math.max(200, startHeight + deltaY);
+                
+                chartContainer.style.height = newHeight + 'px';
+                chartContainer.style.flex = 'none';
+                
+                // Resize the uPlot chart
+                if (chart && chart.chart) {
+                    chart.setSize(chartContainer.offsetWidth, newHeight);
+                }
+            });
+            
+            document.addEventListener('mouseup', () => {
+                isResizing = false;
+            });
+        }
+        
+        // Initialize chart heights based on whether subplots exist
+        function initializeChartHeights() {
+            const mainContainer = document.getElementById('mainContainer');
+            const chartContainer = document.getElementById('chartContainer');
+            const subplotsContainer = document.getElementById('subplotsContainer');
+            const mainHandle = document.getElementById('mainResizeHandle');
+            
+            // Check if subplots will be rendered
+            setTimeout(() => {
+                const hasSubplots = subplotsContainer.children.length > 0;
+                
+                if (!hasSubplots) {
+                    // No subplots: make main chart consume 80% of available height
+                    const availableHeight = mainContainer.offsetHeight;
+                    chartContainer.style.height = (availableHeight * 0.8) + 'px';
+                    chartContainer.style.flex = 'none';
+                    mainHandle.style.display = 'none';
+                } else {
+                    // Has subplots: show resize handle
+                    chartContainer.style.flex = '1';
+                    chartContainer.style.minHeight = '300px';
+                    mainHandle.style.display = 'block';
+                    setupMainResize();
+                }
+                
+                // Resize chart to fit container
+                if (chart && chart.chart) {
+                    chart.setSize(chartContainer.offsetWidth, chartContainer.offsetHeight);
+                }
+            }, 100);
+        }
+        
+        // Setup WebSocket heartbeat connection
+        function setupHeartbeat() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/heartbeat`;
+            
+            console.log('Connecting to heartbeat:', wsUrl);
+            const ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                console.log('Heartbeat connected');
+                
+                // Send ping every 500ms (faster than backend timeout)
+                const interval = setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send('ping');
+                    } else {
+                        clearInterval(interval);
+                    }
+                }, 500);
+                
+                // Clean up on page unload
+                window.addEventListener('beforeunload', () => {
+                    clearInterval(interval);
+                    ws.close();
+                });
+            };
+            
+            ws.onmessage = (event) => {
+                if (event.data === 'pong') {
+                    console.debug('Heartbeat pong received');
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('Heartbeat error:', error);
+            };
+            
+            ws.onclose = () => {
+                console.log('Heartbeat disconnected');
+            };
+        }
+        
+        // Auto-initialize on page load
+        window.addEventListener('load', () => {
+            const sessionId = getSessionId();
+            if (sessionId) {
+                // When launched via Python API, auto-init using existing session
+                initializeData();
+                initializeChartHeights();
+                setupHeartbeat();
+            } else {
+                setupChart();
+                initializeChartHeights();
+            }
+        });
+    </script>
+</body>
+</html>
